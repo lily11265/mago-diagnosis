@@ -923,6 +923,8 @@ MAGO의 무대는 인류 보존을 위해 우주를 항해하는 함선 "마고"
 
 ## 출력 형식
 반드시 아래 JSON 형식만 출력한다. 마크다운, 추가 설명, 코드블록을 붙이지 않는다.
+출력 전체는 반드시 1400토큰 이하로 끝낸다. 긴 인용문을 넣지 말고, 사용자의 표현은 짧은 조각만 반영한다.
+모든 문자열은 한 줄로 작성한다. evidence는 2개, warnings는 필요한 경우 1개만 쓴다.
 {
   "primary_faction": "서방연합 | 동아시아 연합 | 신소련 연합 | 남아시아 연합 | 아프리카 연합 | 로봇",
   "secondary_faction": "없음 또는 후보 세력명",
@@ -930,12 +932,12 @@ MAGO의 무대는 인류 보존을 위해 우주를 항해하는 함선 "마고"
   "consciousness_origin_type": "업로드 1세대 실향민 | 업로드 2세대 재탄생자 | 업로드 3세대 이후 적응자 | 현실 잔류자 | 로봇/AI 기원 | 불명/혼합",
   "narrative_type": "보존자 | 개척자 | 속죄자 | 탈주자 | 수리자 | 중재자 | 실향민 | 계승자",
   "confidence": 0.0,
-  "evidence": ["답안에서 확인한 근거 1", "답안에서 확인한 근거 2", "답안에서 확인한 근거 3"],
-  "score_adjustment_note": "객관식 점수와 서술형 답안이 어떻게 맞거나 충돌했는지 1문장으로 설명",
+  "evidence": ["근거 1을 45자 이내로 요약", "근거 2를 45자 이내로 요약"],
+  "score_adjustment_note": "객관식과 서술형 관계를 60자 이내로 요약",
   "result_title": "짧은 진단명",
-  "result_summary": "2~4문장의 세계관식 설명문",
-  "character_hook": "캐릭터 로그나 프로필에 쓸 수 있는 1문장 후크",
-  "warnings": ["불확실하거나 답안이 부족한 부분이 있으면 적고, 없으면 빈 배열"]
+  "result_summary": "2문장 이하, 160자 이내 설명문",
+  "character_hook": "80자 이내 1문장 후크",
+  "warnings": []
 }`;
 
 // 객관식 점수를 세력명으로 매핑
@@ -947,20 +949,36 @@ const FACTION_KEY_TO_NAME = {
   아: "아프리카 연합"
 };
 
+const BODY_KEY_TO_TYPE = {
+  인: "완전 생체",
+  준: "불명/혼합",
+  프: "로봇 프레임 인간의식",
+  로: "AI 로봇"
+};
+
 // Claude API에 보낼 사용자 페이로드 구성
 function buildUserPayload(answers, written, questions) {
   const factionScores = { 서방연합: 0, "동아시아 연합": 0, "신소련 연합": 0, "남아시아 연합": 0, "아프리카 연합": 0, 로봇: 0 };
+  const bodyScores = { "완전 생체": 0, "반기계": 0, "로봇 프레임 인간의식": 0, "AI 로봇": 0, "불명/혼합": 0 };
   answers.forEach((a, i) => {
     if (a == null) return;
-    const opt = questions[i].options[a];
+    const q = questions[i];
+    const opt = q.options[a];
+    const weight = typeof q.weight === "number" ? q.weight : 1;
     Object.entries(opt.s).forEach(([k, v]) => {
+      const weighted = v * weight;
       if (k in FACTION_KEY_TO_NAME) {
-        factionScores[FACTION_KEY_TO_NAME[k]] += v;
+        factionScores[FACTION_KEY_TO_NAME[k]] += weighted;
       } else if (k === "로") {
-        factionScores["로봇"] += v;
+        factionScores["로봇"] += weighted;
+      } else if (k in BODY_KEY_TO_TYPE) {
+        bodyScores[BODY_KEY_TO_TYPE[k]] += weighted;
       }
     });
   });
+  const round1 = (x) => Math.round(x * 10) / 10;
+  Object.keys(factionScores).forEach((k) => {factionScores[k] = round1(factionScores[k]);});
+  Object.keys(bodyScores).forEach((k) => {bodyScores[k] = round1(bodyScores[k]);});
 
   const short_answers = [];
   answers.forEach((a, i) => {
@@ -979,6 +997,7 @@ function buildUserPayload(answers, written, questions) {
 
   return {
     multiple_choice_scores: factionScores,
+    body_consciousness_scores: bodyScores,
     short_answers
   };
 }
@@ -1003,14 +1022,21 @@ async function claudeComplete({ messages }) {
   const res = await fetch(CLAUDE_WORKER_URL, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ messages })
+    body: JSON.stringify({ messages, max_tokens: 8192, temperature: 0.1 })
   });
   if (!res.ok) {
     const t = await res.text();
     throw new Error(`Worker ${res.status}: ${t.slice(0, 300)}`);
   }
   const data = await res.json();
-  return data.completion || "";
+  if (typeof data.completion === "string") return data.completion;
+  if (Array.isArray(data.content)) {
+    return data.content
+      .filter((item) => item && item.type === "text" && typeof item.text === "string")
+      .map((item) => item.text)
+      .join("");
+  }
+  return "";
 }
 
 function extractClaudeJson(text) {
@@ -1110,6 +1136,109 @@ function parseClaudeJson(text) {
   }
 }
 
+function rankedEntries(scores) {
+  return Object.entries(scores || {}).sort((a, b) => b[1] - a[1]);
+}
+
+function clampConfidence(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0.55;
+  return Math.max(0, Math.min(1, n));
+}
+
+function getPayloadText(payload) {
+  return (payload.short_answers || [])
+    .map((item) => `${item.question || ""} ${item.choice || ""} ${item.answer || ""}`)
+    .join(" ")
+    .toLowerCase();
+}
+
+function inferNarrativeType(payload, primaryFaction) {
+  const text = getPayloadText(payload);
+  const checks = [
+  ["속죄자", ["죄", "속죄", "후회", "반복", "책임"]],
+  ["탈주자", ["탈출", "도망", "자유", "규칙", "통제", "벗어나"]],
+  ["수리자", ["수리", "고치", "정비", "작동", "복구"]],
+  ["중재자", ["중재", "연결", "거래", "교역", "조율"]],
+  ["실향민", ["고향", "상실", "돌아", "그리움", "잃어"]],
+  ["계승자", ["계승", "임무", "보전", "인간 이후", "프로토콜"]],
+  ["개척자", ["탐사", "발견", "미래", "항로", "찾"]],
+  ["보존자", ["보존", "기록", "기억", "보호", "남기"]]];
+
+  const found = checks.find(([, words]) => words.some((word) => text.includes(word)));
+  if (found) return found[0];
+
+  if (primaryFaction === "로봇") return "계승자";
+  if (primaryFaction === "신소련 연합") return "수리자";
+  if (primaryFaction === "남아시아 연합") return "중재자";
+  if (primaryFaction === "서방연합") return "보존자";
+  if (primaryFaction === "동아시아 연합") return "중재자";
+  return "보존자";
+}
+
+function inferConsciousnessOrigin(primaryFaction, bodyType) {
+  if (primaryFaction === "로봇" || bodyType === "AI 로봇") return "로봇/AI 기원";
+  if (primaryFaction === "아프리카 연합" || primaryFaction === "남아시아 연합") return "현실 잔류자";
+  if (bodyType === "로봇 프레임 인간의식") return "업로드 1세대 실향민";
+  if (primaryFaction === "서방연합") return "업로드 1세대 실향민";
+  if (primaryFaction === "동아시아 연합" || primaryFaction === "신소련 연합") return "업로드 3세대 이후 적응자";
+  return "불명/혼합";
+}
+
+function buildClientDiagnosisFallback(payload, reason) {
+  const factionRank = rankedEntries(payload.multiple_choice_scores);
+  const bodyRank = rankedEntries(payload.body_consciousness_scores);
+  const [primaryFaction, primaryScore = 0] = factionRank[0] || ["불명/혼합", 0];
+  const [secondaryFaction, secondaryScore = 0] = factionRank[1] || ["없음", 0];
+  const [bodyType, bodyScore = 0] = bodyRank[0] || ["불명/혼합", 0];
+  const gap = primaryScore - secondaryScore;
+  const narrativeType = inferNarrativeType(payload, primaryFaction);
+  const consciousnessOrigin = inferConsciousnessOrigin(primaryFaction, bodyType);
+  const hasShortAnswers = (payload.short_answers || []).length > 0;
+  const confidence = clampConfidence(0.48 + Math.min(gap, 6) * 0.04 + (hasShortAnswers ? 0.06 : 0));
+  const shortEvidence = (payload.short_answers || [])
+    .map((item) => (item.answer || "").trim())
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((answer) => `서술형 답안의 "${answer.slice(0, 36)}${answer.length > 36 ? "..." : ""}" 표현을 보조 단서로 사용했습니다.`);
+
+  return {
+    primary_faction: primaryFaction,
+    secondary_faction: gap <= 2 && secondaryScore > 0 ? secondaryFaction : "없음",
+    body_consciousness_type: bodyScore > 0 ? bodyType : "불명/혼합",
+    consciousness_origin_type: consciousnessOrigin,
+    narrative_type: narrativeType,
+    confidence,
+    evidence: [
+    `객관식 최고 점수는 ${primaryFaction}(${primaryScore})입니다.`,
+    `신체/의식 점수는 ${bodyScore > 0 ? bodyType : "불명/혼합"}(${bodyScore}) 쪽이 가장 높습니다.`,
+    ...shortEvidence].slice(0, 3),
+    score_adjustment_note: hasShortAnswers ? "Claude 응답이 완성되지 않아 객관식 점수를 기준으로 하고, 서술형 답안은 보조 단서로만 반영했습니다." : "서술형 답안이 없어 객관식 점수만으로 보정 판정했습니다.",
+    result_title: `${primaryFaction} ${narrativeType}`,
+    result_summary: `답안은 ${primaryFaction}의 감각에 가장 가깝습니다. ${bodyScore > 0 ? `신체/의식 유형은 ${bodyType} 쪽으로 기울며, ` : ""}서사 성향은 ${narrativeType}로 보정했습니다.`,
+    character_hook: `${primaryFaction}의 흔적을 품고 ${narrativeType}의 욕망으로 움직이는 인물입니다.`,
+    warnings: [
+    reason ? `Claude 응답 JSON이 완성되지 않아 임시 보정 결과를 표시했습니다: ${String(reason).slice(0, 120)}` : "Claude 응답 JSON이 완성되지 않아 임시 보정 결과를 표시했습니다."]
+  };
+}
+
+function normalizeDiagnosis(result, payload) {
+  const fallback = buildClientDiagnosisFallback(payload);
+  const merged = { ...fallback, ...(result || {}) };
+  merged.confidence = clampConfidence(merged.confidence);
+  merged.evidence = Array.isArray(merged.evidence) ? merged.evidence.filter(Boolean).slice(0, 5) : fallback.evidence;
+  merged.warnings = Array.isArray(result && result.warnings) ? result.warnings.filter(Boolean).slice(0, 3) : [];
+  return merged;
+}
+
+async function requestClaudeDiagnosis(userPrompt) {
+  return claudeComplete({
+    messages: [
+    { role: "user", content: MAGO_SYSTEM_PROMPT + "\n\n---\n\n" + userPrompt }]
+
+  });
+}
+
 // Claude API 호출
 async function callClaudeMagoDiagnosis(payload) {
   const userPrompt = `다음 사용자의 MAGO 진단 답안을 분석하라.
@@ -1117,21 +1246,52 @@ async function callClaudeMagoDiagnosis(payload) {
 객관식 점수:
 ${JSON.stringify(payload.multiple_choice_scores, null, 2)}
 
+신체/의식 점수:
+${JSON.stringify(payload.body_consciousness_scores, null, 2)}
+
 서술형 답안 (작성된 것만, 보기 중 마음에 드는 답이 없을 때 사용자가 직접 적은 답):
 ${payload.short_answers.length > 0 ? JSON.stringify(payload.short_answers, null, 2) : "(서술형 답안이 없습니다. 객관식 점수만 사용해 판정하라.)"}
 
 위 답안을 바탕으로 출신 세력, 신체/의식 유형, 의식 기원 유형, 서사 성향 유형을 판정하라.
 정의표에 없는 설정은 만들지 말고, 반드시 지정된 JSON 형식으로만 답하라.
 JSON 외 다른 텍스트, 마크다운, 코드블록을 절대 붙이지 마라.
+응답은 반드시 완성된 JSON 객체 하나로 끝내라.
+evidence는 2개만, 각 45자 이내. result_summary는 2문장 이하 160자 이내. character_hook은 80자 이내.
+사용자 답안을 긴 문장으로 직접 인용하지 말고 12자 이내 핵심어만 짧게 반영하라.
+warnings는 실제 불확실성이 있을 때만 1개 이하로 쓰고, 없으면 []로 둔다.
 모든 문자열 값은 한 줄로 작성하고, 줄바꿈이 꼭 필요하면 실제 줄바꿈이 아니라 \\n 이스케이프를 사용하라.
 문자열 안의 큰따옴표는 반드시 \\\" 로 이스케이프하라.`;
 
-  const text = await claudeComplete({
-    messages: [
-    { role: "user", content: MAGO_SYSTEM_PROMPT + "\n\n---\n\n" + userPrompt }]
+  let text;
+  try {
+    text = await requestClaudeDiagnosis(userPrompt);
+  } catch (requestErr) {
+    return buildClientDiagnosisFallback(payload, requestErr && requestErr.message ? requestErr.message : requestErr);
+  }
 
-  });
-  return parseClaudeJson(text);
+  try {
+    return normalizeDiagnosis(parseClaudeJson(text), payload);
+  } catch (firstErr) {
+    const retryPrompt = `${userPrompt}
+
+이전 응답은 JSON 파싱에 실패했다: ${firstErr.message}
+전체 결과를 다시 생성하라. 이번에는 반드시 유효한 JSON 객체 하나만 출력한다.
+응답은 압축 JSON이어야 하며 줄바꿈, 마크다운, 코드블록을 넣지 않는다.
+result_summary는 짧은 2문장 이하, evidence는 3개 이하, warnings는 2개 이하로 제한한다.`;
+
+    let retryText;
+    try {
+      retryText = await requestClaudeDiagnosis(retryPrompt);
+    } catch (retryRequestErr) {
+      return buildClientDiagnosisFallback(payload, `${retryRequestErr && retryRequestErr.message ? retryRequestErr.message : retryRequestErr} / 재시도 전 오류: ${firstErr.message}`);
+    }
+
+    try {
+      return normalizeDiagnosis(parseClaudeJson(retryText), payload);
+    } catch (secondErr) {
+      return buildClientDiagnosisFallback(payload, `${secondErr.message} / 재시도 전 오류: ${firstErr.message}`);
+    }
+  }
 }
 
 // --- 최상위 앱 ---

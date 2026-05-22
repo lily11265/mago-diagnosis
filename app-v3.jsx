@@ -1013,6 +1013,103 @@ async function claudeComplete({ messages }) {
   return data.completion || "";
 }
 
+function extractClaudeJson(text) {
+  let jsonStr = (text || "").trim();
+  const fence = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) jsonStr = fence[1].trim();
+
+  const first = jsonStr.indexOf("{");
+  if (first === -1) return jsonStr;
+
+  let inString = false;
+  let escaped = false;
+  let depth = 0;
+  for (let i = first; i < jsonStr.length; i += 1) {
+    const ch = jsonStr[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === "\"") {
+      inString = true;
+    } else if (ch === "{") {
+      depth += 1;
+    } else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return jsonStr.slice(first, i + 1);
+    }
+  }
+
+  const last = jsonStr.lastIndexOf("}");
+  return last > first ? jsonStr.slice(first, last + 1) : jsonStr.slice(first);
+}
+
+function escapeRawControlCharsInJsonStrings(jsonStr) {
+  let out = "";
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < jsonStr.length; i += 1) {
+    const ch = jsonStr[i];
+    const code = ch.charCodeAt(0);
+
+    if (!inString) {
+      out += ch;
+      if (ch === "\"") inString = true;
+      continue;
+    }
+
+    if (escaped) {
+      out += ch;
+      escaped = false;
+      continue;
+    }
+
+    if (ch === "\\") {
+      out += ch;
+      escaped = true;
+    } else if (ch === "\"") {
+      out += ch;
+      inString = false;
+    } else if (ch === "\n") {
+      out += "\\n";
+    } else if (ch === "\r") {
+      out += "\\n";
+      if (jsonStr[i + 1] === "\n") i += 1;
+    } else if (ch === "\t") {
+      out += "\\t";
+    } else if (code < 0x20) {
+      out += `\\u${code.toString(16).padStart(4, "0")}`;
+    } else {
+      out += ch;
+    }
+  }
+
+  return out;
+}
+
+function parseClaudeJson(text) {
+  const jsonStr = extractClaudeJson(text);
+  try {
+    return JSON.parse(jsonStr);
+  } catch (firstErr) {
+    try {
+      return JSON.parse(escapeRawControlCharsInJsonStrings(jsonStr));
+    } catch (secondErr) {
+      secondErr.message = `${secondErr.message} / 원본 오류: ${firstErr.message}`;
+      throw secondErr;
+    }
+  }
+}
+
 // Claude API 호출
 async function callClaudeMagoDiagnosis(payload) {
   const userPrompt = `다음 사용자의 MAGO 진단 답안을 분석하라.
@@ -1025,26 +1122,16 @@ ${payload.short_answers.length > 0 ? JSON.stringify(payload.short_answers, null,
 
 위 답안을 바탕으로 출신 세력, 신체/의식 유형, 의식 기원 유형, 서사 성향 유형을 판정하라.
 정의표에 없는 설정은 만들지 말고, 반드시 지정된 JSON 형식으로만 답하라.
-JSON 외 다른 텍스트, 마크다운, 코드블록을 절대 붙이지 마라.`;
+JSON 외 다른 텍스트, 마크다운, 코드블록을 절대 붙이지 마라.
+모든 문자열 값은 한 줄로 작성하고, 줄바꿈이 꼭 필요하면 실제 줄바꿈이 아니라 \\n 이스케이프를 사용하라.
+문자열 안의 큰따옴표는 반드시 \\\" 로 이스케이프하라.`;
 
   const text = await claudeComplete({
     messages: [
     { role: "user", content: MAGO_SYSTEM_PROMPT + "\n\n---\n\n" + userPrompt }]
 
   });
-
-  // JSON 추출
-  let jsonStr = (text || "").trim();
-  // 코드블록 제거
-  const fence = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fence) jsonStr = fence[1].trim();
-  // 첫 { ~ 마지막 } 잘라내기
-  const first = jsonStr.indexOf("{");
-  const last = jsonStr.lastIndexOf("}");
-  if (first !== -1 && last !== -1 && last > first) {
-    jsonStr = jsonStr.slice(first, last + 1);
-  }
-  return JSON.parse(jsonStr);
+  return parseClaudeJson(text);
 }
 
 // --- 최상위 앱 ---

@@ -404,11 +404,6 @@
     padding-top: 96px;
     padding-bottom: 96px;
   }
-  @media (max-width: 900px) {
-    .q-screen { grid-template-columns: 1fr; }
-    .supre-motif { display: none; }
-  }
-
   .supre-motif-wrap {
     position: relative;
     width: 100%;
@@ -434,6 +429,43 @@
 
   .q-body {
     max-width: 720px;
+  }
+
+  @media (max-width: 900px) {
+    .q-screen {
+      grid-template-columns: 1fr;
+      position: relative;
+    }
+    /* motif slides behind the question on small screens */
+    .q-screen .supre-motif-wrap {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      max-height: none;
+      aspect-ratio: auto;
+      z-index: 0;
+      opacity: 0.16;
+      filter: saturate(0.85);
+      pointer-events: none;
+    }
+    .q-screen .supre-motif {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+    }
+    .q-screen > .q-body,
+    .q-screen > .corner,
+    .q-screen > .q-nav,
+    .q-screen > .progress {
+      position: relative;
+      z-index: 2;
+    }
+    /* keep option backgrounds opaque so text stays sharply readable over the motif */
+    .q-screen .opt { background: var(--paper); }
+    .q-screen .opt:hover { background: var(--paper-dark); }
+    .q-screen .opt.selected { background: var(--ink); }
   }
 
   .big-counter {

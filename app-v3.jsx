@@ -526,6 +526,11 @@ function SupreMotif({ idx }) {
 }
 
 // --- 점수 계산 ---
+// 각 문항의 weight(기본 1.0)를 옵션 점수에 곱한다.
+//   Tier S (2.0): 정체성 앵커 — Q1, Q3, Q14, Q21
+//   Tier A (1.5): 가치관·신체관·약점 강 단서 — Q2, Q5, Q7, Q10, Q13, Q15, Q23, Q30
+//   Tier B (1.0): 행동/생활 단서 (누적 가산용) — Q4, Q9, Q11, Q12, Q18, Q25, Q27, Q29
+// 가중 합산 결과는 float이므로 sort 이후 표시 단계에서 반올림한다.
 function calcResult(answers, questions) {
   const faction = { 서: 0, 동: 0, 소: 0, 남: 0, 아: 0 };
   const body = { 인: 0, 준: 0, 프: 0, 로: 0 };
@@ -533,15 +538,22 @@ function calcResult(answers, questions) {
 
   answers.forEach((a, i) => {
     if (a == null) return;
-    const opt = questions[i].options[a];
+    const q = questions[i];
+    const opt = q.options[a];
+    const w = typeof q.weight === "number" ? q.weight : 1; // 가중치 (기본 1.0)
     Object.entries(opt.s).forEach(([k, v]) => {
-      if (k in faction) faction[k] += v;
-      if (k in body) body[k] += v;
+      if (k in faction) faction[k] += v * w;
+      if (k in body) body[k] += v * w;
     });
     opt.tags.forEach((t) => {
       tagCount[t] = (tagCount[t] || 0) + 1;
     });
   });
+
+  // float → 소수 1자리에서 반올림 (정렬 안정성 + 표시 일관성)
+  const round1 = (x) => Math.round(x * 10) / 10;
+  Object.keys(faction).forEach((k) => (faction[k] = round1(faction[k])));
+  Object.keys(body).forEach((k) => (body[k] = round1(body[k])));
 
   const sortBy = (obj) =>
   Object.entries(obj).sort((a, b) => b[1] - a[1]);
